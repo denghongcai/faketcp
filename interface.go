@@ -14,6 +14,7 @@ import (
 type PacketConn struct {
 	seq           uint32
 	localAddr     net.Addr
+	remoteAddr    net.Addr
 	tcpLocalAddr  net.TCPAddr
 	tcpRemoteAddr net.TCPAddr
 	conn          net.PacketConn
@@ -29,6 +30,11 @@ func (this Addr) String() string {
 
 func (this Addr) Network() string {
 	return ""
+}
+
+func (this *PacketConn) Read(b []byte) (int, error) {
+	n, _, err := this.ReadFrom(b)
+	return n, err
 }
 
 func (this *PacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
@@ -56,6 +62,11 @@ func (this *PacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 		}
 	}
 	return 0, Addr{}, &net.OpError{Op: "read", Err: syscall.EIO}
+}
+
+func (this *PacketConn) Write(b []byte) (int, error) {
+	n, err := this.WriteTo(b, &this.tcpRemoteAddr)
+	return n, err
 }
 
 func (this *PacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
@@ -108,6 +119,10 @@ func (this *PacketConn) LocalAddr() net.Addr {
 	return this.localAddr
 }
 
+func (this *PacketConn) RemoteAddr() net.Addr {
+	return this.remoteAddr
+}
+
 func (this *PacketConn) SetDeadline(t time.Time) error {
 	err := this.conn.SetDeadline(t)
 	if err != nil {
@@ -155,6 +170,7 @@ func Dial(network, address string) (*PacketConn, error) {
 	}
 	packetConn := &PacketConn{
 		localAddr:     conn.LocalAddr(),
+		remoteAddr:    conn.RemoteAddr(),
 		tcpLocalAddr:  *tcpLocalAddr,
 		tcpRemoteAddr: *tcpRemoteAddr,
 		conn:          pconn,
