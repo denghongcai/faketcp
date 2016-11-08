@@ -2,8 +2,8 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"net"
+	"reflect"
 	"syscall"
 	"time"
 
@@ -36,19 +36,22 @@ func (this *PacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	if err != nil {
 		return 0, addr, err
 	} else if this.isServer || addr.String() == this.tcpRemoteAddr.IP.String() {
-		packet := gopacket.NewPacket(b[:n], layers.LayerTypeTCP, gopacket.Default)
+		packet := gopacket.NewPacket(b[:n], layers.LayerTypeTCP, gopacket.NoCopy)
 		if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
 			tcp, ok := tcpLayer.(*layers.TCP)
 			if !ok {
 				return 0, addr, errors.New("packet doesn't contain tcp layer")
 			}
 
-			fmt.Printf("%#v\n", packet.ApplicationLayer().Payload())
-
-			if tcp.DstPort.String() == string(this.tcpLocalAddr.Port) {
-				payload := packet.ApplicationLayer().Payload()
-				copy(b[:len(payload)], payload[:])
-				return len(payload), addr, nil
+			dstPortRef := reflect.ValueOf(tcp.DstPort)
+			if int(dstPortRef.Uint()) == this.tcpLocalAddr.Port && tcp.URG {
+				applicationLayer := packet.ApplicationLayer()
+				if applicationLayer != nil {
+					payload := applicationLayer.Payload()
+					copy(b[:len(payload)], payload[:])
+					return len(payload), addr, nil
+				}
+				return 0, addr, errors.New("packet doesn't contain application layer")
 			}
 		}
 	}

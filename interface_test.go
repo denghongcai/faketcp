@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"net"
 	"testing"
 	"time"
@@ -21,15 +22,19 @@ func TestDialAndListen(t *testing.T) {
 		t.Error(err)
 		return
 	}
+	c := make(chan bool)
 	go func() {
 		for {
 			b := make([]byte, 4096)
-			t.Log("reading from client")
+			t.Log("reading from conn")
 			n, _, err := sconn.ReadFrom(b)
 			if err != nil {
-				t.Error(err)
+				t.Log(err)
+				continue
 			}
-			t.Logf("%#v", b[:n])
+			if bytes.Equal([]byte{1, 2, 3}, b[:n]) {
+				c <- true
+			}
 		}
 	}()
 	conn, err := Dial("tcp", "127.0.0.1:8000")
@@ -45,5 +50,9 @@ func TestDialAndListen(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	time.Sleep(30 * time.Second)
+	select {
+	case <-c:
+	case <-time.After(time.Second * 1):
+		t.Fail()
+	}
 }
