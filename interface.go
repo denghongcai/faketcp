@@ -39,12 +39,12 @@ func (this *PacketConn) Read(b []byte) (int, error) {
 }
 
 func (this *PacketConn) ReadFrom(buf []byte) (int, net.Addr, error) {
-	b := make([]byte, 65536)
+	b := make([]byte, 2048)
 	n, addr, err := this.conn.ReadFrom(b)
 	if err != nil {
 		return 0, addr, err
 	} else if this.isServer || addr.String() == this.tcpRemoteAddr.IP.String() {
-		packet := gopacket.NewPacket(b[:n], layers.LayerTypeTCP, gopacket.NoCopy)
+		packet := gopacket.NewPacket(b[:n], layers.LayerTypeTCP, gopacket.DecodeOptions{Lazy: true, NoCopy: true})
 		if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
 			tcp, ok := tcpLayer.(*layers.TCP)
 			if !ok {
@@ -58,7 +58,7 @@ func (this *PacketConn) ReadFrom(buf []byte) (int, net.Addr, error) {
 					srcPortRef := reflect.ValueOf(tcp.SrcPort)
 					udpSrcAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", addr.String(), srcPortRef.Uint()))
 					payload := applicationLayer.Payload()
-					copy(buf[:len(payload)], payload[:])
+					copy(buf[:len(payload)], payload)
 					return len(payload), udpSrcAddr, nil
 				}
 				return 0, addr, errors.New("packet doesn't contain application layer")
