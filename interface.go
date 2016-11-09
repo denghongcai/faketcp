@@ -2,6 +2,7 @@ package faketcp
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"reflect"
 	"syscall"
@@ -53,9 +54,11 @@ func (this *PacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 			if int(dstPortRef.Uint()) == this.tcpLocalAddr.Port && tcp.URG {
 				applicationLayer := packet.ApplicationLayer()
 				if applicationLayer != nil {
+					srcPortRef := reflect.ValueOf(tcp.SrcPort)
+					tcpSrcAddr, _ := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", addr.String(), srcPortRef.Uint()))
 					payload := applicationLayer.Payload()
 					copy(b[:len(payload)], payload[:])
-					return len(payload), addr, nil
+					return len(payload), tcpSrcAddr, nil
 				}
 				return 0, addr, errors.New("packet doesn't contain application layer")
 			}
