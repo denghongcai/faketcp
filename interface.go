@@ -38,7 +38,8 @@ func (this *PacketConn) Read(b []byte) (int, error) {
 	return n, err
 }
 
-func (this *PacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
+func (this *PacketConn) ReadFrom(buf []byte) (int, net.Addr, error) {
+	b := make([]byte, 65536)
 	n, addr, err := this.conn.ReadFrom(b)
 	if err != nil {
 		return 0, addr, err
@@ -55,16 +56,16 @@ func (this *PacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 				applicationLayer := packet.ApplicationLayer()
 				if applicationLayer != nil {
 					srcPortRef := reflect.ValueOf(tcp.SrcPort)
-					tcpSrcAddr, _ := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", addr.String(), srcPortRef.Uint()))
+					udpSrcAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", addr.String(), srcPortRef.Uint()))
 					payload := applicationLayer.Payload()
-					copy(b[:len(payload)], payload[:])
-					return len(payload), tcpSrcAddr, nil
+					copy(buf[:len(payload)], payload[:])
+					return len(payload), udpSrcAddr, nil
 				}
 				return 0, addr, errors.New("packet doesn't contain application layer")
 			}
 		}
 	}
-	return 0, Addr{}, &net.OpError{Op: "read", Err: syscall.EIO}
+	return 0, Addr{}, nil
 }
 
 func (this *PacketConn) Write(b []byte) (int, error) {
@@ -73,18 +74,18 @@ func (this *PacketConn) Write(b []byte) (int, error) {
 }
 
 func (this *PacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
-	tcpRemoteAddr, ok := addr.(*net.TCPAddr)
+	udpRemoteAddr, ok := addr.(*net.UDPAddr)
 	if !ok {
 		return 0, &net.OpError{Op: "write", Addr: addr, Err: syscall.EINVAL}
 	}
 	ip := &layers.IPv4{
 		SrcIP:    this.tcpLocalAddr.IP,
-		DstIP:    tcpRemoteAddr.IP,
+		DstIP:    udpRemoteAddr.IP,
 		Protocol: layers.IPProtocolTCP,
 	}
 	tcp := &layers.TCP{
 		SrcPort: layers.TCPPort(this.tcpLocalAddr.Port),
-		DstPort: layers.TCPPort(tcpRemoteAddr.Port),
+		DstPort: layers.TCPPort(udpRemoteAddr.Port),
 		Seq:     this.seq,
 		URG:     true,
 		Window:  14600,
@@ -99,7 +100,7 @@ func (this *PacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 		return 0, err
 	}
 	bufBytes := buf.Bytes()
-	n, err := this.conn.WriteTo(bufBytes, &net.IPAddr{IP: tcpRemoteAddr.IP})
+	n, err := this.conn.WriteTo(bufBytes, &net.IPAddr{IP: udpRemoteAddr.IP})
 	if err != nil {
 		return 0, err
 	}
@@ -159,15 +160,15 @@ func Dial(network, address string) (*PacketConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	tcpLocalAddr, err := net.ResolveTCPAddr(network, conn.LocalAddr().String())
+	tcpLocalAddr, err := net.ResolveTCPAddr("tcp", conn.LocalAddr().String())
 	if err != nil {
 		return nil, err
 	}
-	pconn, err := net.ListenPacket("ip:"+network, tcpLocalAddr.IP.String())
+	pconn, err := net.ListenPacket("ip:tcp", tcpLocalAddr.IP.String())
 	if err != nil {
 		return nil, err
 	}
-	tcpRemoteAddr, err := net.ResolveTCPAddr(network, address)
+	tcpRemoteAddr, err := net.ResolveTCPAddr("tcp", address)
 	if err != nil {
 		return nil, err
 	}
@@ -183,11 +184,11 @@ func Dial(network, address string) (*PacketConn, error) {
 }
 
 func Listen(network, address string) (*PacketConn, error) {
-	tcpLocalAddr, err := net.ResolveTCPAddr(network, address)
+	tcpLocalAddr, err := net.ResolveTCPAddr("tcp", address)
 	if err != nil {
 		return nil, err
 	}
-	pconn, err := net.ListenPacket("ip:"+network, tcpLocalAddr.IP.String())
+	pconn, err := net.ListenPacket("ip:tcp", tcpLocalAddr.IP.String())
 	if err != nil {
 		return nil, err
 	}

@@ -22,11 +22,11 @@ func server() {
 		if err != nil || n == 0 {
 			continue
 		}
-		tcpRemoteAddr, ok := addr.(*net.TCPAddr)
+		udpRemoteAddr, ok := addr.(*net.UDPAddr)
 		if !ok {
 			continue
 		}
-		conn.WriteTo(b[:n], tcpRemoteAddr)
+		conn.WriteTo(b[:n], udpRemoteAddr)
 	}
 }
 
@@ -37,7 +37,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestDial(t *testing.T) {
-	conn, err := Dial("tcp", "www.baidu.com:80")
+	conn, err := Dial("udp", "www.baidu.com:80")
 	if err != nil {
 		t.Error(err)
 		return
@@ -47,12 +47,12 @@ func TestDial(t *testing.T) {
 
 func TestDialAndListen(t *testing.T) {
 	c := make(chan bool)
-	conn, err := Dial("tcp", address)
+	conn, err := Dial("udp", address)
 	if err != nil {
 		t.Error(err)
 	}
 	buf := []byte{1, 2, 3}
-	addr, err := net.ResolveTCPAddr("tcp", address)
+	addr, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
 		t.Error(err)
 	}
