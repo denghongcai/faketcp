@@ -39,7 +39,7 @@ func (this *PacketConn) Read(b []byte) (int, error) {
 }
 
 func (this *PacketConn) ReadFrom(buf []byte) (int, net.Addr, error) {
-	b := make([]byte, 2048)
+	b := make([]byte, 4096)
 	n, addr, err := this.conn.ReadFrom(b)
 	if err != nil {
 		return 0, addr, err
@@ -194,6 +194,7 @@ func Listen(network, address string) (*PacketConn, error) {
 	}
 	return &PacketConn{
 		tcpLocalAddr: *tcpLocalAddr,
+		localAddr:    tcpLocalAddr,
 		conn:         pconn,
 		isServer:     true,
 	}, nil
