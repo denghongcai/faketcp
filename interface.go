@@ -5,14 +5,20 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	DebugLog "github.com/tj/go-debug"
 )
 
+var debug = DebugLog.Debug("faketcp")
+
+// PacketConn implemented net.PacketConn
 type PacketConn struct {
+	seqMutex      sync.Mutex
 	seq           uint32
 	localAddr     net.Addr
 	remoteAddr    net.Addr
@@ -22,22 +28,12 @@ type PacketConn struct {
 	isServer      bool
 }
 
-type Addr struct {
-}
-
-func (this Addr) String() string {
-	return ""
-}
-
-func (this Addr) Network() string {
-	return ""
-}
-
 func (this *PacketConn) Read(b []byte) (int, error) {
 	n, _, err := this.ReadFrom(b)
 	return n, err
 }
 
+// ReadFrom read packet from raw socket
 func (this *PacketConn) ReadFrom(buf []byte) (int, net.Addr, error) {
 	b := make([]byte, 4096)
 	n, addr, err := this.conn.ReadFrom(b)
@@ -53,6 +49,7 @@ func (this *PacketConn) ReadFrom(buf []byte) (int, net.Addr, error) {
 
 			dstPortRef := reflect.ValueOf(tcp.DstPort)
 			if int(dstPortRef.Uint()) == this.tcpLocalAddr.Port && tcp.URG {
+				debug("receive tcp packet from %s:%d", addr.String(), this.tcpLocalAddr.Port)
 				applicationLayer := packet.ApplicationLayer()
 				if applicationLayer != nil {
 					srcPortRef := reflect.ValueOf(tcp.SrcPort)
@@ -65,7 +62,7 @@ func (this *PacketConn) ReadFrom(buf []byte) (int, net.Addr, error) {
 			}
 		}
 	}
-	return 0, Addr{}, nil
+	return 0, &net.UDPAddr{}, nil
 }
 
 func (this *PacketConn) Write(b []byte) (int, error) {
@@ -73,6 +70,7 @@ func (this *PacketConn) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// WriteTo write packet to raw socket
 func (this *PacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	udpRemoteAddr, ok := addr.(*net.UDPAddr)
 	if !ok {
@@ -107,10 +105,14 @@ func (this *PacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	if n != len(bufBytes) {
 		return 0, errors.New("data is not sent")
 	}
+	debug("writed to %s, seq is %d", udpRemoteAddr.String(), this.seq)
+	this.seqMutex.Lock()
 	this.seq = this.seq + 1
+	defer this.seqMutex.Unlock()
 	return len(b), nil
 }
 
+// Close close the underlying raw socket
 func (this *PacketConn) Close() error {
 	err := this.conn.Close()
 	if err != nil {
@@ -172,6 +174,7 @@ func Dial(network, address string) (*PacketConn, error) {
 	if err != nil {
 		return nil, err
 	}
+	debug("connected to %s", tcpRemoteAddr.String())
 	packetConn := &PacketConn{
 		localAddr:     conn.LocalAddr(),
 		remoteAddr:    conn.RemoteAddr(),
@@ -192,6 +195,7 @@ func Listen(network, address string) (*PacketConn, error) {
 	if err != nil {
 		return nil, err
 	}
+	debug("listening on %s", tcpLocalAddr.String())
 	return &PacketConn{
 		tcpLocalAddr: *tcpLocalAddr,
 		localAddr:    tcpLocalAddr,
