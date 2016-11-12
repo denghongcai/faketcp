@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcap"
 	DebugLog "github.com/tj/go-debug"
 )
 
@@ -18,14 +19,16 @@ var debug = DebugLog.Debug("faketcp")
 
 // PacketConn implemented net.PacketConn
 type PacketConn struct {
-	seqMutex      sync.Mutex
-	seq           uint32
-	localAddr     net.Addr
-	remoteAddr    net.Addr
-	tcpLocalAddr  net.TCPAddr
-	tcpRemoteAddr net.TCPAddr
-	conn          net.PacketConn
-	isServer      bool
+	seqMutex       sync.Mutex
+	seq            uint32
+	localAddr      net.Addr
+	remoteAddr     net.Addr
+	tcpLocalAddr   net.TCPAddr
+	tcpRemoteAddr  net.TCPAddr
+	conn           net.PacketConn
+	readPacketChan chan gopacket.Packet
+	isServer       bool
+	closed         bool
 }
 
 func (this *PacketConn) Read(b []byte) (int, error) {
@@ -35,28 +38,33 @@ func (this *PacketConn) Read(b []byte) (int, error) {
 
 // ReadFrom read packet from raw socket
 func (this *PacketConn) ReadFrom(buf []byte) (int, net.Addr, error) {
-	b := make([]byte, 4096)
-	n, addr, err := this.conn.ReadFrom(b)
-	if err != nil {
-		return 0, addr, err
-	} else if this.isServer || addr.String() == this.tcpRemoteAddr.IP.String() {
-		packet := gopacket.NewPacket(b[:n], layers.LayerTypeTCP, gopacket.DecodeOptions{Lazy: true, NoCopy: true})
+	packet, ok := <-this.readPacketChan
+	if !ok {
+		return 0, &net.UDPAddr{}, errors.New("read channel has been closed")
+	} else {
+		addr := &net.UDPAddr{}
+		if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
+			ip, ok := ipLayer.(*layers.IPv4)
+			if !ok {
+				return 0, addr, errors.New("packet doesn't contain ipv4 layer")
+			}
+			addr.IP = ip.SrcIP
+		}
 		if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
 			tcp, ok := tcpLayer.(*layers.TCP)
 			if !ok {
-				return 0, addr, errors.New("packet doesn't contain tcp layer")
+				return 0, &net.UDPAddr{}, errors.New("packet doesn't contain tcp layer")
 			}
+			srcPortRef := reflect.ValueOf(tcp.SrcPort)
+			addr.Port = int(srcPortRef.Uint())
 
-			dstPortRef := reflect.ValueOf(tcp.DstPort)
-			if int(dstPortRef.Uint()) == this.tcpLocalAddr.Port && tcp.URG {
+			if tcp.URG {
 				debug("receive tcp packet from %s:%d", addr.String(), this.tcpLocalAddr.Port)
 				applicationLayer := packet.ApplicationLayer()
 				if applicationLayer != nil {
-					srcPortRef := reflect.ValueOf(tcp.SrcPort)
-					udpSrcAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", addr.String(), srcPortRef.Uint()))
 					payload := applicationLayer.Payload()
 					copy(buf[:len(payload)], payload)
-					return len(payload), udpSrcAddr, nil
+					return len(payload), addr, nil
 				}
 				return 0, addr, errors.New("packet doesn't contain application layer")
 			}
@@ -153,6 +161,53 @@ func (this *PacketConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
+func (this *PacketConn) getLocalDev() (string, error) {
+	dev := ""
+	devs, err := pcap.FindAllDevs()
+	if err != nil {
+		return dev, err
+	}
+
+	for _, d := range devs {
+		for _, a := range d.Addresses {
+			if a.IP.String() == this.tcpLocalAddr.IP.String() {
+				dev = d.Name
+			}
+		}
+	}
+
+	if dev == "" {
+		return dev, errors.New("could not find the appropriate adapter device")
+	}
+	return dev, nil
+}
+
+func (this *PacketConn) initReceiver() error {
+	devName, err := this.getLocalDev()
+	if err != nil {
+		return err
+	}
+	bpf := ""
+	if this.isServer {
+		bpf = fmt.Sprintf("tcp and dst port %d and dst host %s", this.tcpLocalAddr.Port, this.tcpLocalAddr.IP.String())
+	} else {
+		bpf = fmt.Sprintf("tcp and dst port %d and src host %s", this.tcpLocalAddr.Port, this.tcpRemoteAddr.IP.String())
+	}
+	if handle, err := pcap.OpenLive(devName, 8192, true, pcap.BlockForever); err != nil {
+		return err
+	} else if err := handle.SetBPFFilter(bpf); err != nil {
+		return err
+	} else {
+		debug("BPF filter: %s", bpf)
+		packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+		packetSource.NoCopy = true
+		packetSource.Lazy = true
+		this.readPacketChan = packetSource.Packets()
+		debug("receiver inited")
+		return nil
+	}
+}
+
 func Dial(network, address string) (*PacketConn, error) {
 	udpRemoteAddr, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
@@ -183,6 +238,9 @@ func Dial(network, address string) (*PacketConn, error) {
 		conn:          pconn,
 		seq:           0,
 	}
+	if err := packetConn.initReceiver(); err != nil {
+		return nil, err
+	}
 	return packetConn, nil
 }
 
@@ -196,10 +254,14 @@ func Listen(network, address string) (*PacketConn, error) {
 		return nil, err
 	}
 	debug("listening on %s", tcpLocalAddr.String())
-	return &PacketConn{
+	packetConn := &PacketConn{
 		tcpLocalAddr: *tcpLocalAddr,
 		localAddr:    tcpLocalAddr,
 		conn:         pconn,
 		isServer:     true,
-	}, nil
+	}
+	if err := packetConn.initReceiver(); err != nil {
+		return nil, err
+	}
+	return packetConn, nil
 }

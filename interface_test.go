@@ -72,9 +72,11 @@ func TestDialAndListen(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
+	start := time.Now()
 	select {
 	case <-c:
-	case <-time.After(time.Second * 1):
+		t.Logf("rt: %d", time.Now().Sub(start).Nanoseconds()/1000/1000)
+	case <-time.After(time.Second * 10):
 		t.Fail()
 	}
 }
