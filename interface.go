@@ -29,6 +29,7 @@ type PacketConn struct {
 	readPacketChan chan gopacket.Packet
 	isServer       bool
 	closed         bool
+	status         int // 0: init, 1: sync, 2: established
 }
 
 func (this *PacketConn) Read(b []byte) (int, error) {
@@ -38,39 +39,56 @@ func (this *PacketConn) Read(b []byte) (int, error) {
 
 // ReadFrom read packet from raw socket
 func (this *PacketConn) ReadFrom(buf []byte) (int, net.Addr, error) {
+	tcp, payload, addr, err := this.readFromChan()
+	if err != nil {
+		return 0, addr, err
+	}
+	if tcp.URG {
+		debug("receive tcp data packet from %s:%d", addr.String(), this.tcpLocalAddr.Port)
+		if payload != nil {
+			copy(buf[:len(*payload)], *payload)
+			return len(*payload), addr, err
+		}
+		return 0, addr, errors.New("packet doesn't contain payload")
+	}
+	if tcp.SYN {
+		debug("receive tcp syn data packet from %s:%d", addr.String(), this.tcpLocalAddr.Port)
+		this.writeSynAck(addr)
+	}
+
+	return 0, addr, err
+}
+
+func (this *PacketConn) readFromChan() (*layers.TCP, *[]byte, net.Addr, error) {
+	addr := &net.UDPAddr{}
 	packet, ok := <-this.readPacketChan
 	if !ok {
-		return 0, &net.UDPAddr{}, errors.New("read channel has been closed")
+		return &layers.TCP{}, nil, addr, errors.New("read channel has been closed")
 	} else {
-		addr := &net.UDPAddr{}
 		if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
 			ip, ok := ipLayer.(*layers.IPv4)
 			if !ok {
-				return 0, addr, errors.New("packet doesn't contain ipv4 layer")
+				return &layers.TCP{}, nil, addr, errors.New("packet doesn't contain ipv4 layer")
 			}
 			addr.IP = ip.SrcIP
-		}
-		if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
-			tcp, ok := tcpLayer.(*layers.TCP)
-			if !ok {
-				return 0, &net.UDPAddr{}, errors.New("packet doesn't contain tcp layer")
-			}
-			srcPortRef := reflect.ValueOf(tcp.SrcPort)
-			addr.Port = int(srcPortRef.Uint())
-
-			if tcp.URG {
-				debug("receive tcp packet from %s:%d", addr.String(), this.tcpLocalAddr.Port)
+			if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+				tcp, ok := tcpLayer.(*layers.TCP)
+				if !ok {
+					return &layers.TCP{}, nil, addr, errors.New("packet doesn't contain tcp layer")
+				}
+				srcPortRef := reflect.ValueOf(tcp.SrcPort)
+				addr.Port = int(srcPortRef.Uint())
 				applicationLayer := packet.ApplicationLayer()
 				if applicationLayer != nil {
 					payload := applicationLayer.Payload()
-					copy(buf[:len(payload)], payload)
-					return len(payload), addr, nil
+					return tcp, &payload, addr, nil
 				}
-				return 0, addr, errors.New("packet doesn't contain application layer")
+
+				return tcp, nil, addr, nil
 			}
 		}
 	}
-	return 0, &net.UDPAddr{}, nil
+	return &layers.TCP{}, nil, addr, nil
 }
 
 func (this *PacketConn) Write(b []byte) (int, error) {
@@ -82,27 +100,68 @@ func (this *PacketConn) Write(b []byte) (int, error) {
 func (this *PacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	udpRemoteAddr, ok := addr.(*net.UDPAddr)
 	if !ok {
-		return 0, &net.OpError{Op: "write", Addr: addr, Err: syscall.EINVAL}
+		return 0, &net.OpError{Op: "writre", Addr: addr, Err: syscall.EINVAL}
 	}
-	ip := &layers.IPv4{
-		SrcIP:    this.tcpLocalAddr.IP,
-		DstIP:    udpRemoteAddr.IP,
-		Protocol: layers.IPProtocolTCP,
-	}
-	tcp := &layers.TCP{
+	tcpLayer := &layers.TCP{
 		SrcPort: layers.TCPPort(this.tcpLocalAddr.Port),
 		DstPort: layers.TCPPort(udpRemoteAddr.Port),
 		Seq:     this.seq,
 		URG:     true,
 		Window:  14600,
 	}
-	tcp.SetNetworkLayerForChecksum(ip)
+	return this.writeToBase(&b, tcpLayer, udpRemoteAddr)
+}
+
+// WriteSyn write syn packet to raw socket
+func (this *PacketConn) writeSyn(addr net.Addr) error {
+	udpRemoteAddr, ok := addr.(*net.UDPAddr)
+	if !ok {
+		return &net.OpError{Op: "writre", Addr: addr, Err: syscall.EINVAL}
+	}
+	tcpLayer := &layers.TCP{
+		SrcPort: layers.TCPPort(this.tcpLocalAddr.Port),
+		DstPort: layers.TCPPort(udpRemoteAddr.Port),
+		Seq:     this.seq,
+		SYN:     true,
+		Window:  14600,
+	}
+	var payload []byte
+	_, err := this.writeToBase(&payload, tcpLayer, udpRemoteAddr)
+	return err
+}
+
+// WriteSynAck write syn-ack packet to raw socket
+func (this *PacketConn) writeSynAck(addr net.Addr) error {
+	udpRemoteAddr, ok := addr.(*net.UDPAddr)
+	if !ok {
+		return &net.OpError{Op: "writre", Addr: addr, Err: syscall.EINVAL}
+	}
+	tcpLayer := &layers.TCP{
+		SrcPort: layers.TCPPort(this.tcpLocalAddr.Port),
+		DstPort: layers.TCPPort(udpRemoteAddr.Port),
+		Seq:     this.seq,
+		SYN:     true,
+		Ack:     this.seq + 1,
+		Window:  14600,
+	}
+	var payload []byte
+	_, err := this.writeToBase(&payload, tcpLayer, udpRemoteAddr)
+	return err
+}
+
+func (this *PacketConn) writeToBase(payload *[]byte, tcpLayer *layers.TCP, udpRemoteAddr *net.UDPAddr) (int, error) {
+	ip := &layers.IPv4{
+		SrcIP:    this.tcpLocalAddr.IP,
+		DstIP:    udpRemoteAddr.IP,
+		Protocol: layers.IPProtocolTCP,
+	}
+	tcpLayer.SetNetworkLayerForChecksum(ip)
 	buf := gopacket.NewSerializeBuffer()
 	opts := gopacket.SerializeOptions{
 		ComputeChecksums: true,
 		FixLengths:       true,
 	}
-	if err := gopacket.SerializeLayers(buf, opts, tcp, gopacket.Payload(b)); err != nil {
+	if err := gopacket.SerializeLayers(buf, opts, tcpLayer, gopacket.Payload(*payload)); err != nil {
 		return 0, err
 	}
 	bufBytes := buf.Bytes()
@@ -117,7 +176,7 @@ func (this *PacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	this.seqMutex.Lock()
 	this.seq = this.seq + 1
 	defer this.seqMutex.Unlock()
-	return len(b), nil
+	return len(*payload), nil
 }
 
 // Close close the underlying raw socket
@@ -238,6 +297,7 @@ func Dial(network, address string) (*PacketConn, error) {
 		conn:          pconn,
 		seq:           0,
 	}
+	packetConn.writeSyn(conn.RemoteAddr())
 	if err := packetConn.initReceiver(); err != nil {
 		return nil, err
 	}
