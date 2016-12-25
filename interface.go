@@ -43,7 +43,7 @@ func (this *PacketConn) ReadFrom(buf []byte) (int, net.Addr, error) {
 	if err != nil {
 		return 0, addr, err
 	}
-	if tcp.URG {
+	if tcp.PSH {
 		debug("receive tcp data packet from %s:%d", addr.String(), this.tcpLocalAddr.Port)
 		if payload != nil {
 			copy(buf[:len(*payload)], *payload)
@@ -51,7 +51,7 @@ func (this *PacketConn) ReadFrom(buf []byte) (int, net.Addr, error) {
 		}
 		return 0, addr, errors.New("packet doesn't contain payload")
 	}
-	if tcp.SYN {
+	if tcp.SYN && this.isServer {
 		debug("receive tcp syn data packet from %s:%d", addr.String(), this.tcpLocalAddr.Port)
 		this.writeSynAck(addr)
 	}
@@ -106,7 +106,7 @@ func (this *PacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 		SrcPort: layers.TCPPort(this.tcpLocalAddr.Port),
 		DstPort: layers.TCPPort(udpRemoteAddr.Port),
 		Seq:     this.seq,
-		URG:     true,
+		PSH:     true,
 		Window:  14600,
 	}
 	return this.writeToBase(&b, tcpLayer, udpRemoteAddr)
@@ -141,6 +141,7 @@ func (this *PacketConn) writeSynAck(addr net.Addr) error {
 		DstPort: layers.TCPPort(udpRemoteAddr.Port),
 		Seq:     this.seq,
 		SYN:     true,
+		ACK:     true,
 		Ack:     this.seq + 1,
 		Window:  14600,
 	}
@@ -276,7 +277,9 @@ func Dial(network, address string) (*PacketConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	tcpLocalAddr, err := net.ResolveTCPAddr("tcp", conn.LocalAddr().String())
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	localAddr.Port = 1993
+	tcpLocalAddr, err := net.ResolveTCPAddr("tcp", localAddr.String())
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +293,7 @@ func Dial(network, address string) (*PacketConn, error) {
 	}
 	debug("connected to %s", tcpRemoteAddr.String())
 	packetConn := &PacketConn{
-		localAddr:     conn.LocalAddr(),
+		localAddr:     localAddr,
 		remoteAddr:    conn.RemoteAddr(),
 		tcpLocalAddr:  *tcpLocalAddr,
 		tcpRemoteAddr: *tcpRemoteAddr,
